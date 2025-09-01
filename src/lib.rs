@@ -1,5 +1,6 @@
 mod server;
 mod trt_ffi;
+mod tensor;
 
 use crate::server::InferenceServer;
 use crate::trt_ffi::TRTInferencerFactory;

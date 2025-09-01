@@ -13,6 +13,7 @@ use std::sync::{Arc, Mutex};
 use cudarc::driver::sys::CUdeviceptr;
 use thiserror::Error;
 use crate::server::{InferenceEngine, InferenceEngineFactory};
+use crate::tensor::{get_element_size, DataType};
 
 type TRTDimType = i64;
 
@@ -20,6 +21,7 @@ type TRTDimType = i64;
 pub mod trt_ffi_clib {
     use libc::{c_int, c_void, size_t};
     use std::ffi::c_char;
+    use crate::tensor::DataType;
     use crate::trt_ffi::TRTDimType;
 
     // Opaque pointers
@@ -29,22 +31,6 @@ pub mod trt_ffi_clib {
     pub struct ICudaEngine(c_void);
     #[repr(C)]
     pub struct IExecutionContext(c_void);
-
-    #[repr(C)]
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    pub enum DataType {
-        Float = 0,
-        Half = 1,
-        Int8 = 2,
-        Int32 = 3,
-        UINT8 = 5,
-        FP8 = 6,
-        BF16 = 7,
-        INT64 = 8,
-        INT4 = 9,
-        FP4 = 10,
-        E8M0 = 11,
-    }
 
     #[repr(C)]
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -195,24 +181,8 @@ impl Drop for TrtEngineV3 {
 pub struct TensorInfo {
     pub name: String,
     pub shape: Vec<TRTDimType>, // Shape WITHOUT batch dimension
-    pub dtype: trt_ffi_clib::DataType,
+    pub dtype: DataType,
     pub mode: trt_ffi_clib::TensorIOMode,
-}
-
-fn get_element_size(dtype: &trt_ffi_clib::DataType) -> usize {
-    match dtype {
-        trt_ffi_clib::DataType::Float => 4,
-        trt_ffi_clib::DataType::Half => 2,
-        trt_ffi_clib::DataType::Int8 => 1,
-        trt_ffi_clib::DataType::Int32 => 4,
-        trt_ffi_clib::DataType::UINT8 => 1,
-        trt_ffi_clib::DataType::FP8 => 1,
-        trt_ffi_clib::DataType::BF16 => 2,
-        trt_ffi_clib::DataType::INT64 => 8,
-        trt_ffi_clib::DataType::INT4 => 1, // Assuming packed
-        trt_ffi_clib::DataType::FP4 => 1, // Assuming packed
-        trt_ffi_clib::DataType::E8M0 => 1, // Assuming packed
-    }
 }
 
 impl TensorInfo {
