@@ -1,0 +1,13 @@
+[build-system]
+requires = ["maturin>=1.0,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "trt-inferencer-client"
+description = "Python client for Rust inference server"
+requires-python = ">=3.7"
+dependencies = ["numpy<2"]
+dynamic = ["version"]
+
+[tool.maturin]
+features = ["pyo3/extension-module"]

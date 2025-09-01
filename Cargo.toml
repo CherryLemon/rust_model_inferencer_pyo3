@@ -1,0 +1,25 @@
+[package]
+name = "rust_model_inferencer_pyo3"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "rust_model_inferencer_pyo3"
+crate-type = ["cdylib"]
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+ndarray = "0.16.1"
+anyhow = "1"
+log = "0.4.27"
+thiserror = "2.0.12"
+libc = "1.0.0-alpha.1"
+cudarc = { version = "0.17.2" , features = ["cuda-12080"]}
+byteorder = "1.5.0"
+pyo3 = { version = "0.25.1", features = ["extension-module"] }
+pyo3-async-runtimes = { version = "0.25.0", features = ["tokio-runtime"] }
+numpy = "0.25.0"
+crossbeam-channel = "0.5.15"
+
+[build-dependencies]
+cc = "1"
