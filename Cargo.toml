@@ -14,7 +14,7 @@ anyhow = "1"
 log = "0.4.27"
 thiserror = "2.0.12"
 libc = "1.0.0-alpha.1"
-cudarc = { version = "0.17.2" , features = ["cuda-12080"]}
+cudarc = { version = "0.17.2" , features = ["cuda-12010"]}
 byteorder = "1.5.0"
 pyo3 = { version = "0.25.1", features = ["extension-module"] }
 pyo3-async-runtimes = { version = "0.25.0", features = ["tokio-runtime"] }

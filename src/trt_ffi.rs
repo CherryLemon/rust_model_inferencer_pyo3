@@ -199,21 +199,25 @@ pub struct TensorInfo {
     pub mode: trt_ffi_clib::TensorIOMode,
 }
 
+fn get_element_size(dtype: &trt_ffi_clib::DataType) -> usize {
+    match dtype {
+        trt_ffi_clib::DataType::Float => 4,
+        trt_ffi_clib::DataType::Half => 2,
+        trt_ffi_clib::DataType::Int8 => 1,
+        trt_ffi_clib::DataType::Int32 => 4,
+        trt_ffi_clib::DataType::UINT8 => 1,
+        trt_ffi_clib::DataType::FP8 => 1,
+        trt_ffi_clib::DataType::BF16 => 2,
+        trt_ffi_clib::DataType::INT64 => 8,
+        trt_ffi_clib::DataType::INT4 => 1, // Assuming packed
+        trt_ffi_clib::DataType::FP4 => 1, // Assuming packed
+        trt_ffi_clib::DataType::E8M0 => 1, // Assuming packed
+    }
+}
+
 impl TensorInfo {
     pub fn get_element_size(&self) -> usize {
-        match self.dtype {
-            trt_ffi_clib::DataType::Float => 4,
-            trt_ffi_clib::DataType::Half => 2,
-            trt_ffi_clib::DataType::Int8 => 1,
-            trt_ffi_clib::DataType::Int32 => 4,
-            trt_ffi_clib::DataType::UINT8 => 1,
-            trt_ffi_clib::DataType::FP8 => 1,
-            trt_ffi_clib::DataType::BF16 => 2,
-            trt_ffi_clib::DataType::INT64 => 8,
-            trt_ffi_clib::DataType::INT4 => 1, // Assuming packed
-            trt_ffi_clib::DataType::FP4 => 1, // Assuming packed
-            trt_ffi_clib::DataType::E8M0 => 1, // Assuming packed
-        }
+        get_element_size(&self.dtype)
     }
 }
 
@@ -414,13 +418,8 @@ impl TrtContextV3 {
         let mut outputs: HashMap<String, DeviceBuffer> = HashMap::new();
         for name in &self.engine.output_names {
             let info = &self.engine.tensor_info[self.engine.name_to_idx[name]];
-            let element_size = match info.dtype {
-                trt_ffi_clib::DataType::Float => 4,
-                trt_ffi_clib::DataType::Half => 2,
-                _ => 4,
-            };
             let single_item_bytes: usize =
-                info.shape.iter().map(|&d| d as usize).product::<usize>() * element_size;
+                info.shape.iter().map(|&d| d as usize).product::<usize>() * info.get_element_size();
             let output_buffer = DeviceBuffer::alloc(self.stream.clone(), batch_size * single_item_bytes)?;
             outputs.insert(name.clone(), output_buffer);
         }
@@ -450,13 +449,8 @@ impl TrtContextV3 {
             // Set tensor addresses for all inputs and outputs for this chunk
             for name in &self.engine.input_names {
                 let info = &self.engine.tensor_info[self.engine.name_to_idx[name]];
-                let element_size = match info.dtype {
-                    trt_ffi_clib::DataType::Float => 4,
-                    trt_ffi_clib::DataType::Half => 2,
-                    _ => 4,
-                };
                 let single_item_bytes =
-                    info.shape.iter().map(|&d| d as usize).product::<usize>() * element_size;
+                    info.shape.iter().map(|&d| d as usize).product::<usize>() * info.get_element_size();
                 let offset = start_idx * single_item_bytes;
                 let reference = inputs.get_mut(name).unwrap();
 
@@ -471,13 +465,8 @@ impl TrtContextV3 {
 
             for name in &self.engine.output_names {
                 let info = &self.engine.tensor_info[self.engine.name_to_idx[name]];
-                let element_size = match info.dtype {
-                    trt_ffi_clib::DataType::Float => 4,
-                    trt_ffi_clib::DataType::Half => 2,
-                    _ => 4,
-                };
                 let single_item_bytes =
-                    info.shape.iter().map(|&d| d as usize).product::<usize>() * element_size;
+                    info.shape.iter().map(|&d| d as usize).product::<usize>() * info.get_element_size();
                 let offset = start_idx * single_item_bytes;
 
                 let device_ptr = outputs.get_mut(name).unwrap().device_ptr();

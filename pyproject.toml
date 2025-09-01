@@ -3,7 +3,7 @@ requires = ["maturin>=1.0,<2.0"]
 build-backend = "maturin"
 
 [project]
-name = "trt-inferencer-client"
+name = "rust_model_inferencer_pyo3"
 description = "Python client for Rust inference server"
 requires-python = ">=3.7"
 dependencies = ["numpy<2"]
