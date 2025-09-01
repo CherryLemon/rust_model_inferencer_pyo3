@@ -369,7 +369,7 @@ impl InferenceClient {
 }
 
 /// Python模块
-#[pymodule(name = "trt_inferencer_pyo3")]
+#[pymodule(name = "rust_model_inferencer_pyo3")]
 fn inference_client(_py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<InferenceClient>()?;
     m.add_class::<AsyncInferenceClient>()?;
