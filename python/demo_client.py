@@ -2,7 +2,7 @@ import numpy as np
 import asyncio
 from tqdm import trange
 from trt_inferencer_pyo3.trt_inferencer_pyo3 import InferenceServerPy as InferenceServer, AsyncInferenceClient
-from redeuler.utils.prometheus import timeit
+
 async def test_async():
     # 创建异步客户端
     client = AsyncInferenceClient("/tmp/inference.sock")
@@ -23,7 +23,7 @@ async def test_async():
 
         try:
             # 并发执行推理
-            results = await timeit()(asyncio.gather)(*tasks)
+            results = await asyncio.gather(*tasks)
 
             # print(f"完成了 {len(results)} 个并发推理请求")
             # print(results[0])
