@@ -3,8 +3,8 @@ use std::process::Command;
 use std::env;
 
 fn main() {
-    let trt_root_dir = env::var("TENSORRT_ROOT_DIR").unwrap_or("/home/lemon_cn/tensorrt10".to_string());
-    let cuda_root_dir = env::var("CUDA_HOME").unwrap_or("/home/lemon_cn/cuda-12.8".to_string());
+    let trt_root_dir = env::var("TENSORRT_ROOT_DIR").unwrap_or("/opt/tensorrt-10.13/TensorRT-10.13.2.6".to_string());
+    let cuda_root_dir = env::var("CUDA_HOME").unwrap_or("/usr/local/cuda".to_string());
     let trt_include_dir = format!("{}/include", trt_root_dir);
     let trt_lib_dir = format!("{}/lib", trt_root_dir);
     let cuda_lib_dir = format!("{}/lib64", cuda_root_dir);

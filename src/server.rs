@@ -9,10 +9,9 @@ use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{oneshot, mpsc};
+use crate::tensor::{data_type_from_u8, Tensor};
+use crate::protocol::{InferenceProtocol};
 
-// 协议常量
-const MAGIC_HEADER: u32 = 0x12345678;
-const DTYPE_F32: u8 = 1;
 
 // 批处理配置
 #[derive(Clone)]
@@ -33,76 +32,60 @@ impl Default for BatchConfig {
 // 请求结构
 struct InferenceRequest {
     id: u64,
-    input: HashMap<String, ArrayD<f32>>,
+    input: HashMap<String, Tensor>,
     batch_size: usize,
-    response_tx: mpsc::UnboundedSender<Result<HashMap<String, ArrayD<f32>>>>,
+    response_tx: mpsc::UnboundedSender<Result<HashMap<String, Tensor>>>,
 }
 
-fn calc_batch_size(input: &HashMap<String, ArrayD<f32>>) -> usize {
-    input.values().next().map_or(1, |array| array.shape().get(0).cloned().unwrap_or(1))
+fn calc_batch_size(input: &HashMap<String, Tensor>) -> usize {
+    input.values().next().map_or(1, |array| array.batch_size())
 }
 
-// 分割批处理输出的辅助函数
-fn split_array(array: &ArrayD<f32>, start_offset: usize, end_offset: usize) -> Result<ArrayD<f32>> {
-    Ok(array.slice_axis(ndarray::Axis(0), Slice::new(start_offset as isize, Some(end_offset as isize), 1)).to_owned())
-}
-
-fn split_vector_map(outputs: &HashMap<String, ArrayD<f32>>, start_offset: usize, end_offset: usize) -> Result<HashMap<String, ArrayD<f32>>> {
+fn split_vector_map(outputs: &HashMap<String, Tensor>, start_offset: usize, end_offset: usize) -> Result<HashMap<String, Tensor>> {
     let mut split_map = HashMap::new();
     for (key, array) in outputs {
-        let split_array = split_array(array, start_offset, end_offset)?;
+        let split_array = array.slice(start_offset..end_offset)?;
         split_map.insert(key.clone(), split_array);
     }
     Ok(split_map)
 }
 
 // 批处理中合并输入的辅助函数
-fn merge_inputs(inputs: &[HashMap<String, ArrayD<f32>>]) -> Result<HashMap<String, ArrayD<f32>>> {
+fn merge_inputs(inputs: &[&HashMap<String, Tensor>]) -> Result<HashMap<String, Tensor>> {
     if inputs.is_empty() {
         return Ok(HashMap::new());
     }
 
     let mut merged = HashMap::new();
-    let first_input = &inputs[0];
+    let first_input = inputs[0];
 
     for (key, first_array) in first_input {
         // 收集所有相同key的数组
-        let arrays: Vec<&ArrayD<f32>> = inputs
+        let arrays: Vec<&Tensor> = inputs
             .iter()
             .map(|input| input.get(key))
             .collect::<Option<Vec<_>>>()
             .ok_or_else(|| anyhow!("Inconsistent input keys across batch"))?;
 
-        // 沿第0维合并数组（假设第0维是batch维度）
-        let mut batch_shape = first_array.shape().to_vec();
-        batch_shape[0] = arrays.iter().map(|e| -> usize {e.shape()[0]}).sum(); // 设置batch大小
-
-        // 简单的合并实现 - 实际应用中可能需要更复杂的逻辑
-        let mut batch_data = Vec::new();
-        for array in &arrays {
-            batch_data.extend(array.iter().cloned());
-        }
-
-        let batch_array = ArrayD::from_shape_vec(batch_shape, batch_data)?;
-        merged.insert(key.clone(), batch_array);
+        merged.insert(key.clone(), Tensor::merge(&arrays)?);
     }
 
     Ok(merged)
 }
+
 // 修改后的推理框架接口，支持批处理
 pub trait InferenceEngine {
-    fn infer(&mut self, input: &HashMap<String, ArrayD<f32>>) -> Result<HashMap<String, ArrayD<f32>>>;
+    fn infer(&mut self, input: &HashMap<String, Tensor>) -> Result<HashMap<String, Tensor>>;
 
-    fn infer_batch(&mut self, inputs: Vec<HashMap<String, ArrayD<f32>>>) -> Result<Vec<HashMap<String, ArrayD<f32>>>> {
+    fn infer_batch(&mut self, inputs: Vec<&HashMap<String, Tensor>>) -> Result<Vec<HashMap<String, Tensor>>> {
         // 合并输入为批处理格式
         if inputs.len() == 1 {
-            return Ok(vec![self.infer(&inputs.into_iter().next().unwrap())?]);
+            return Ok(vec![self.infer(inputs[0])?]);
         }
         let merged_input = merge_inputs(&inputs)?;
 
         // 执行批处理推理
         let result = self.infer(&merged_input)?;
-
         // 分割输出为单个请求格式
         let mut results = vec![];
         let mut start_offset = 0;
@@ -117,9 +100,9 @@ pub trait InferenceEngine {
 }
 
 impl InferenceRequest {
-    fn new(input: HashMap<String, ArrayD<f32>>, response_tx: mpsc::UnboundedSender<Result<HashMap<String, ArrayD<f32>>>>) -> Self {
+    fn new(input: HashMap<String, Tensor>, response_tx: mpsc::UnboundedSender<Result<HashMap<String, Tensor>>>) -> Self {
         // 拿到input的第一个value,计算batch_size
-        let batch_size = input.values().next().map_or(1, |array| array.shape().get(0).cloned().unwrap_or(1));
+        let batch_size = input.values().next().map_or(1, |array| array.batch_size());
         Self {
             id: 0, // 将在处理线程中设置
             input,
@@ -133,7 +116,7 @@ impl InferenceRequest {
         requests.push(InferenceRequest{
             id: 0, // 将在处理线程中设置
             input: HashMap::from_iter(self.input.iter().map(|(k, v)| {
-                let slice = v.slice_axis(ndarray::Axis(0), Slice::new(0, Some(offset as isize), 1)).to_owned();
+                let slice = v.slice(0..offset).unwrap();
                 (k.clone(), slice)
             })),
             batch_size: offset,
@@ -142,7 +125,7 @@ impl InferenceRequest {
         requests.push(InferenceRequest{
             id: 0, // 将在处理线程中设置
             input: HashMap::from_iter(self.input.iter().map(|(k, v)| {
-                let slice = v.slice_axis(ndarray::Axis(0), Slice::new(offset as isize, None,1)).to_owned();
+                let slice = v.slice(offset..self.batch_size).unwrap();
                 (k.clone(), slice)
             })),
             batch_size: offset,
@@ -195,9 +178,9 @@ impl<T: InferenceEngine> BatchProcessor<T> {
         println!("Executing batch of {} requests", requests.len());
 
         // 收集所有输入
-        let inputs: Vec<HashMap<String, ArrayD<f32>>> = requests
+        let inputs: Vec<&HashMap<String, Tensor>> = requests
             .iter()
-            .map(|req| req.input.clone())
+            .map(|req| &req.input)
             .collect();
 
         // 执行批处理推理
@@ -343,7 +326,7 @@ impl InferenceProxy {
         }
     }
 
-    pub async fn infer(&self, input: HashMap<String, ArrayD<f32>>) -> Result<HashMap<String, ArrayD<f32>>> {
+    pub async fn infer(&self, input: HashMap<String, Tensor>) -> Result<HashMap<String, Tensor>> {
         let (response_tx, mut response_rx) = mpsc::unbounded_channel();
 
         let request = InferenceRequest::new(input, response_tx);
@@ -368,7 +351,7 @@ impl InferenceProxy {
                         if results.len() == 1 {
                             return results.into_iter().next().ok_or_else(|| anyhow!("Inference thread has stopped"));
                         }
-                        return merge_inputs(&results);
+                        return merge_inputs(results.iter().collect::<Vec<&HashMap<String, Tensor>>>().as_slice());
                     }
                 }
             }
@@ -433,177 +416,76 @@ impl InferenceServer {
             }
 
             let magic = LittleEndian::read_u32(&magic_buf);
-            if magic != MAGIC_HEADER {
+            if magic != InferenceProtocol::MAGIC_HEADER {
                 return Err(anyhow!("Invalid magic header"));
             }
 
             // 读取请求
-            let input_data = Self::read_arrays(&mut stream).await?;
+            let input_data = InferenceProtocol::read_arrays(&mut stream).await?;
 
             // 处理推理 - 现在通过代理异步处理，支持批处理
             let response = match proxy.infer(input_data).await {
                 Ok(result) => result,
                 Err(e) => {
                     // 发送错误响应
-                    Self::write_error(&mut stream, &e.to_string()).await?;
+                    InferenceProtocol::write_error(&mut stream, &e.to_string()).await?;
                     continue;
                 }
             };
 
             // 发送响应
-            Self::write_arrays(&mut stream, response).await?;
+            InferenceProtocol::write_arrays(&mut stream, &response).await?;
         }
 
         Ok(())
     }
 
-    async fn read_arrays(stream: &mut UnixStream) -> Result<HashMap<String, ArrayD<f32>>> {
-        // 读取数组数量
-        let mut count_buf = [0u8; 4];
-        stream.read_exact(&mut count_buf).await?;
-        let array_count = LittleEndian::read_u32(&count_buf) as usize;
-
-        let mut arrays = HashMap::new();
-
-        for _ in 0..array_count {
-            // 读取数组名长度
-            let mut name_len_buf = [0u8; 4];
-            stream.read_exact(&mut name_len_buf).await?;
-            let name_len = LittleEndian::read_u32(&name_len_buf) as usize;
-
-            // 读取数组名
-            let mut name_buf = vec![0u8; name_len];
-            stream.read_exact(&mut name_buf).await?;
-            let name = String::from_utf8(name_buf)?;
-
-            // 读取数据类型
-            let mut dtype_buf = [0u8; 1];
-            stream.read_exact(&mut dtype_buf).await?;
-            if dtype_buf[0] != DTYPE_F32 {
-                return Err(anyhow!("Unsupported dtype, only f32 is supported"));
-            }
-
-            // 读取维度数量
-            let mut ndim_buf = [0u8; 4];
-            stream.read_exact(&mut ndim_buf).await?;
-            let ndim = LittleEndian::read_u32(&ndim_buf) as usize;
-
-            // 读取各维度大小
-            let mut shape = vec![0usize; ndim];
-            for i in 0..ndim {
-                let mut dim_buf = [0u8; 8];
-                stream.read_exact(&mut dim_buf).await?;
-                shape[i] = LittleEndian::read_u64(&dim_buf) as usize;
-            }
-
-            // 读取数据长度
-            let mut data_len_buf = [0u8; 8];
-            stream.read_exact(&mut data_len_buf).await?;
-            let data_len = LittleEndian::read_u64(&data_len_buf) as usize;
-
-            // 读取原始数据
-            let mut data_buf = vec![0u8; data_len];
-            stream.read_exact(&mut data_buf).await?;
-
-            // 零拷贝转换：直接从字节构造f32数组
-            let float_data = unsafe {
-                std::slice::from_raw_parts(
-                    data_buf.as_ptr() as *const f32,
-                    data_len / size_of::<f32>()
-                )
-            };
-
-            // 创建ArrayD
-            let array = ArrayD::from_shape_vec(shape, float_data.to_vec())?;
-            arrays.insert(name, array);
-        }
-
-        Ok(arrays)
-    }
-
-    async fn write_arrays(stream: &mut UnixStream, arrays: HashMap<String, ArrayD<f32>>) -> Result<()> {
-        // 写入magic header (成功标记)
-        let magic_buf = MAGIC_HEADER.to_le_bytes();
-        stream.write_all(&magic_buf).await?;
-
-        // 写入数组数量
-        let count_buf = (arrays.len() as u32).to_le_bytes();
-        stream.write_all(&count_buf).await?;
-
-        for (name, array) in arrays {
-            // 写入数组名长度和名称
-            let name_bytes = name.as_bytes();
-            let name_len_buf = (name_bytes.len() as u32).to_le_bytes();
-            stream.write_all(&name_len_buf).await?;
-            stream.write_all(name_bytes).await?;
-
-            // 写入数据类型
-            stream.write_all(&[DTYPE_F32]).await?;
-
-            // 写入维度信息
-            let shape = array.shape();
-            let ndim_buf = (shape.len() as u32).to_le_bytes();
-            stream.write_all(&ndim_buf).await?;
-
-            for &dim in shape {
-                let dim_buf = (dim as u64).to_le_bytes();
-                stream.write_all(&dim_buf).await?;
-            }
-
-            // 获取原始数据并写入
-            let raw_data = unsafe {
-                std::slice::from_raw_parts(
-                    array.as_ptr() as *const u8,
-                    array.len() * size_of::<f32>()
-                )
-            };
-
-            let data_len_buf = (raw_data.len() as u64).to_le_bytes();
-            stream.write_all(&data_len_buf).await?;
-            stream.write_all(raw_data).await?;
-        }
-
-        Ok(())
-    }
-
-    async fn write_error(stream: &mut UnixStream, error: &str) -> Result<()> {
-        // 写入错误magic header
-        let error_magic = 0x87654321u32.to_le_bytes();
-        stream.write_all(&error_magic).await?;
-
-        // 写入错误消息
-        let error_bytes = error.as_bytes();
-        let error_len_buf = (error_bytes.len() as u32).to_le_bytes();
-        stream.write_all(&error_len_buf).await?;
-        stream.write_all(error_bytes).await?;
-
-        Ok(())
-    }
 }
 
 // 示例推理引擎 - 支持批处理
-pub struct CudaEngine {
+pub struct DemoEngine {
     // 假设这里有CUDA上下文和缓冲区
 }
 
-impl InferenceEngine for CudaEngine {
-    fn infer(&mut self, input: &HashMap<String, ArrayD<f32>>) -> Result<HashMap<String, ArrayD<f32>>> {
+impl InferenceEngine for DemoEngine {
+    fn infer(&mut self, input: &HashMap<String, Tensor>) -> Result<HashMap<String, Tensor>> {
         let mut batch_output = HashMap::new();
         for (key, array) in input {
-            println!("Processing batched array '{}' with shape {:?}", key, array.shape());
+            println!("Processing batched array '{}' with shape {:?}", key, array.shape);
             // 示例：元素乘以2（保持批处理格式）
-            let output = array * 2.0;
+            let output_data: Vec<u8> = array.data.chunks_exact(array.element_size())
+                .flat_map(|chunk| {
+                    match array.dtype {
+                        crate::tensor::DataType::Float => {
+                            let val = LittleEndian::read_f32(chunk);
+                            let new_val = val * 2.0;
+                            new_val.to_le_bytes().to_vec()
+                        }
+                        crate::tensor::DataType::Int32 => {
+                            let val = LittleEndian::read_i32(chunk);
+                            let new_val = val * 2;
+                            new_val.to_le_bytes().to_vec()
+                        }
+                        _ => chunk.to_vec(), // 其他类型不变
+                    }
+                })
+                .collect();
+            let output = Tensor {
+                data: output_data,
+                shape: array.shape.clone(),
+                dtype: array.dtype.clone(),
+            };
             batch_output.insert(format!("{}_output", key), output);
         }
         Ok(batch_output)
     }
 }
 
-pub struct CudaEngineFactory;
+pub struct DemoEngineEngineFactory;
 
-impl InferenceEngineFactory<CudaEngine> for CudaEngineFactory {
-    fn create_engine(&self) -> Result<CudaEngine> {
-        Ok(CudaEngine {
+impl InferenceEngineFactory<DemoEngine> for DemoEngineEngineFactory {
+    fn create_engine(&self) -> Result<DemoEngine> {
+        Ok(DemoEngine {
             // 初始化CUDA上下文和缓冲区
         })
     }
@@ -616,7 +498,7 @@ async fn main() -> Result<()> {
         max_batch_size: 4,
         batch_timeout: Duration::from_millis(5),
     };
-    let factory = Box::<CudaEngineFactory>::new(CudaEngineFactory{});
+    let factory = Box::<DemoEngineEngineFactory>::new(DemoEngineEngineFactory{});
     let server = InferenceServer::new_with_config(factory, batch_config)?;
     let (sender, receiver) = oneshot::channel();
     let fut = server.serve("/tmp/inference.sock", sender);
