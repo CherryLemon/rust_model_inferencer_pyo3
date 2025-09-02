@@ -1,8 +1,12 @@
 use std::cmp::PartialEq;
 use anyhow::anyhow;
+use pyo3::{pyclass, pymethods};
+use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pymethods};
+use pyo3_stub_gen::{PyStubType, TypeInfo};
 
 #[repr(C)]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Copy)]
+#[pyclass]
 pub enum DataType {
     Float = 0,
     Half = 1,
@@ -15,6 +19,12 @@ pub enum DataType {
     INT4 = 9,
     FP4 = 10,
     E8M0 = 11,
+}
+
+impl PyStubType for DataType {
+    fn type_output() -> TypeInfo {
+        TypeInfo::unqualified("DataType")
+    }
 }
 
 pub fn data_type_from_u8(value: u8) -> Option<DataType> {
@@ -50,6 +60,9 @@ pub fn get_element_size(dtype: &DataType) -> usize {
     }
 }
 
+#[gen_stub_pyclass]
+#[pyclass(frozen)]
+#[derive(Debug, Clone)]
 pub struct Tensor {
     pub data: Vec<u8>,
     pub shape: Vec<usize>,
@@ -58,11 +71,11 @@ pub struct Tensor {
 
 impl Tensor {
     pub fn new(data: Vec<u8>, shape: Vec<usize>, dtype: DataType) -> anyhow::Result<Self> {
-        let element_size = get_element_size(&dtype);
-        match {data.len() == shape.iter().product() * element_size} {
-            true => {Ok(Self { data, shape, dtype })},
-            false => {Err(anyhow!("Data length does not match shape and element size"))},
-        }
+        // let element_size = get_element_size(&dtype);
+        // if (data.len() != shape.iter().product::<usize>() * element_size) {
+        //     return Err(anyhow!("Data length does not match shape and element size"))
+        // }
+        Ok(Self { data, shape, dtype })
     }
 
     pub fn element_size(&self) -> usize {
@@ -71,14 +84,6 @@ impl Tensor {
 
     pub fn len(&self) -> usize {
         self.data.len() / self.element_size()
-    }
-
-    pub fn iter(&self) -> impl Iterator<Item = f32> + '_ {
-        self.data.chunks_exact(self.element_size()).map(|chunk| {
-            let mut arr = [0u8; 4];
-            arr.copy_from_slice(chunk);
-            f32::from_le_bytes(arr)
-        })
     }
 
     pub fn batch_size(&self) -> usize {
@@ -94,6 +99,7 @@ impl Tensor {
             return Err(anyhow!("Invalid slice range"));
         }
         let slice_size = range.end - range.start;
+        // println!("Slicing tensor: original shape={:?}, slice range={:?}, slice size={}", self.shape, range, slice_size);
         let element_count_per_slice: usize = self.shape.iter().skip(1).product();
         let byte_start = range.start * element_count_per_slice * self.element_size();
         let byte_end = range.end * element_count_per_slice * self.element_size();
@@ -107,13 +113,12 @@ impl Tensor {
         })
     }
 
-    pub fn merge(tensors: &[Tensor]) -> anyhow::Result<Tensor> {
+    pub fn merge(tensors: &Vec<&Tensor>) -> anyhow::Result<Tensor> {
         if tensors.is_empty() {
             return Err(anyhow!("No tensors to merge"));
         }
         let first_shape = &tensors[0].shape;
         let dtype = tensors[0].dtype.clone();
-        let element_size = tensors[0].element_size();
         for tensor in tensors {
             if tensor.shape.len() != first_shape.len() {
                 return Err(anyhow!("Tensors have different number of dimensions"));

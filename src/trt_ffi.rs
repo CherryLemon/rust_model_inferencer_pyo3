@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex};
 use cudarc::driver::sys::CUdeviceptr;
 use thiserror::Error;
 use crate::server::{InferenceEngine, InferenceEngineFactory};
-use crate::tensor::{get_element_size, DataType};
+use crate::tensor::{get_element_size, DataType, Tensor};
 
 type TRTDimType = i64;
 
@@ -500,8 +500,8 @@ impl TrtInferencerV3 {
 impl InferenceEngine for TrtInferencerV3 {
     fn infer(
         &mut self,
-        inputs: &HashMap<String, ArrayD<f32>>,
-    ) -> Result<HashMap<String, ArrayD<f32>>> {
+        inputs: &HashMap<String, Tensor>,
+    ) -> Result<HashMap<String, Tensor>> {
         // Validate inputs
         for name in self.context.engine.input_names.iter() {
             if !inputs.contains_key(name) {
@@ -509,16 +509,16 @@ impl InferenceEngine for TrtInferencerV3 {
             } else {
                 let info = &self.context.engine.tensor_info[self.context.engine.name_to_idx[name]];
                 let expected_shape: Vec<usize> = {
-                    let mut s = vec![inputs[name].shape()[0]]; // Batch size
+                    let mut s = vec![inputs[name].shape[0]]; // Batch size
                     s.extend(info.shape.iter().map(|&d| d as usize));
                     s
                 };
-                if inputs[name].shape() != expected_shape.as_slice() {
+                if inputs[name].shape != expected_shape.as_slice() {
                     bail!(
                         "Input tensor '{}' shape mismatch: expected {:?}, got {:?}",
                         name,
                         expected_shape,
-                        inputs[name].shape()
+                        inputs[name].shape
                     );
                 }
             }
@@ -526,15 +526,13 @@ impl InferenceEngine for TrtInferencerV3 {
         // 1. Copy CPU to GPU
         let mut gpu_inputs = HashMap::new();
         for (name, array) in inputs {
-            let data_slice = array
-                .as_slice()
-                .ok_or_else(|| anyhow!("Input array '{}' is not contiguous", name))?;
+            let data_slice = &array.data;
 
             let buffer = DeviceBuffer::from_host_slice(
-                self.default_stream.clone(), data_slice)?;
+                self.default_stream.clone(), &*data_slice)?;
             gpu_inputs.insert(name.clone(), buffer);
         }
-
+        
         let mut gpu_inputs_ref: HashMap<String, &mut DeviceBuffer> = gpu_inputs
             .iter_mut()
             .map(|(k, v)| (k.clone(), v))
@@ -542,24 +540,25 @@ impl InferenceEngine for TrtInferencerV3 {
 
         // 2. Run GPU inference
         let gpu_outputs = self.context.inference_gpu(&mut gpu_inputs_ref)?;
-
         // 3. Copy GPU to CPU
         let mut cpu_outputs = HashMap::new();
-        let batch_size = inputs.values().next().unwrap().shape()[0];
+        let batch_size = inputs.values().next().unwrap().shape[0];
         for (name, gpu_buffer) in gpu_outputs {
             let info = &self.context.engine.tensor_info[self.context.engine.name_to_idx[&name]];
 
-            let mut host_vec = vec![0.0f32; gpu_buffer.size() / size_of::<f32>()];
+            let mut host_vec = vec![0u8; gpu_buffer.size()];
             gpu_buffer.copy_to_host(&mut host_vec)?;
 
             let mut final_shape = vec![batch_size];
             final_shape.extend(info.shape.iter().map(|&d| d as usize));
 
-            let array = Array::from_shape_vec(IxDyn(&final_shape), host_vec)
-                .with_context(|| format!("Failed to create ndarray for output '{}'", name))?;
+            let array = Tensor{
+                data: host_vec,
+                shape: final_shape,
+                dtype: info.dtype.clone(),
+            };
             cpu_outputs.insert(name, array);
         }
-
         Ok(cpu_outputs)
     }
 }

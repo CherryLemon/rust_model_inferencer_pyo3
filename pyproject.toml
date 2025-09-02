@@ -10,4 +10,6 @@ dependencies = ["numpy<2"]
 dynamic = ["version"]
 
 [tool.maturin]
+module-name = "rust_model_inferencer_pyo3._native"
+python-source = "python"
 features = ["pyo3/extension-module"]
